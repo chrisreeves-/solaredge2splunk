@@ -1,38 +1,46 @@
-import datetime
 import http.client
+import json
+import pytz
+import os
 import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
+
+timezone = pytz.timezone('AUSTRALIA/Brisbane')
 
 # Remove unverified HTTPS request warning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
-solaredgeurl = "monitoringapi.solaredge.com"
-solaredgesite = "xxxxxxx"
-solaredgeapikey = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-splunkurl = "splunk.example.com:888"
-splunkapi = "Splunk xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+solaredgeurl = os.environ.get('solaredgeurl')
+solaredgesite = os.environ.get('solaredgesite')
+solaredgeapikey = os.environ.get('solaredgeapikey')
+splunkuri = os.environ.get('splunkurl')
+splunkapi = os.environ.get('splunkapi')
 
-year = datetime.datetime.now().year
-month = datetime.datetime.now().month
-hour = datetime.datetime.now().hour
-day = datetime.datetime.now().day
-startmin = datetime.datetime.now().minute - 15
-endmin = datetime.datetime.now().minute
+def data():
+    # Get 15 minute chunk of data from SolarEdge
+    conn = http.client.HTTPSConnection(solaredgeurl)
+    payload = ''
+    headers = {'Accept': 'application/json'}
+    conn.request("GET", f"/site/{solaredgesite}/currentPowerFlow?api_key={solaredgeapikey}", payload, headers)
+    res = conn.getresponse()
+    data = res.read()
+    jsonfmt = json.loads(data.decode('utf8'))
+    # Send data to Splunk
+    splunkurl = f"https://{splunkuri}/services/collector/event"
+    authHeader = {'Authorization': f'{splunkapi}'}
+    powerstats = {"event": jsonfmt, "sourcetype": "lambda"}
+    sendtosplunk = requests.post(splunkurl, headers=authHeader, json=powerstats, verify=False)
+    # Error handling/reporting
+    if sendtosplunk.status_code in range(200, 299):
+        print("Posted successfully to " + sendtosplunk.url)
+    elif sendtosplunk.status_code in range(300, 399):
+        print("Redirect errors to " + sendtosplunk.url)
+    elif sendtosplunk.status_code in range(429, 429):
+        print("Too many API requests to " + sendtosplunk)
+    elif sendtosplunk.status_code in range(400, 428 or 430, 499):
+        print("Client errors to " + sendtosplunk.url)
+    elif sendtosplunk.status_code in range(500, 599):
+        print("Server errors to " + sendtosplunk.url)
 
-# Get 15 minute chunk of data from SolarEdge
-conn = http.client.HTTPSConnection(solaredgeurl)
-payload = ''
-headers = {'Accept': 'application/json'}
-conn.request("GET", f"/site/{solaredgesite}/power?startTime={year}-{month}-{day}%20{hour}:{startmin}:00&endTime={year}-{month}-{day}%20{hour}:{endmin}:00&api_key={solaredgeapikey}", payload, headers)
-res = conn.getresponse()
-data = res.read()
-
-# Send data to Splunk
-splunkurl=f'https://{splunkurl}/services/collector/event'
-authHeader = {'Authorization': f'{splunkapi}'}
-powerstats = {"event": data.decode('utf8'), "sourcetype": "lambda"}
-sendtosplunk = requests.post(splunkurl, headers=authHeader, json=powerstats, verify=False)
-if sendtosplunk.status_code == 200:
-    print("Posted successfully to " + sendtosplunk.url)
-elif sendtosplunk.status_code >= 400:
-    print("Failed to send data to " + sendtosplunk.url)
+def main(event, context):
+    data()
